@@ -17,3 +17,7 @@ A small project where I played around with LEDs, push buttons, and GPIO pins. No
 - Breadboard and jumper wires
 
 Just a small step forward in learning embedded programming. More experiments coming soon.
+
+# Scheme
+
+![ESP32 circuit scheme](scheme.png)
