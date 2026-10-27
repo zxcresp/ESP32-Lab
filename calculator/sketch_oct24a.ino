@@ -10,9 +10,7 @@ const int BTN_LEFT = 25;
 const int BTN_RIGHT = 26;
 const int BTN_OK = 27;
 const int BTN_POWER = 18;
-int cursorRow = 0;
-int cursorCol = 0;
-String expression = "";
+const int Blue_LED = 2;
 const int rowy1 = 60;
 const int rowy2 = 47;
 const int rowy3 = 35;
@@ -21,12 +19,23 @@ const int rowx1 = 15;
 const int rowx2 = 45;
 const int rowx3 = 78;
 const int rowx4 = 110;
+const unsigned long debounceDelay = 50;
+
+int cursorRow = 0;
+int cursorCol = 0;
+int lastReading = HIGH;
+
 bool LastPowerState = HIGH;
 bool PowerState;
 bool ScreenState = true;
+bool OkPressed = false;
+bool lastOKState = HIGH;
+bool longPressHandled = false;
+
 unsigned long lastDebounceTime = 0;
-const unsigned long debounceDelay = 50;
-int lastReading = HIGH;
+unsigned long pressStart = 0;
+
+String expression = "";
 
 void setup() {
   pinMode(BTN_UP, INPUT_PULLUP);
@@ -35,6 +44,7 @@ void setup() {
   pinMode(BTN_RIGHT, INPUT_PULLUP);
   pinMode(BTN_OK, INPUT_PULLUP);
   pinMode(BTN_POWER, INPUT_PULLUP);
+  pinMode(Blue_LED, OUTPUT);
 
   Wire.begin(21, 22);
   oled.begin();
@@ -43,6 +53,7 @@ void setup() {
 }
 
 void bootScreen() {
+  digitalWrite(Blue_LED, HIGH);
   oled.clearBuffer();
   oled.drawXBMP(0, 0, 128, 64, anonymous_logo);
   oled.sendBuffer();
@@ -53,7 +64,7 @@ void bootScreen() {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tf);
 
-    oled.drawStr(32, 25, "FSOCIETY");
+    oled.drawStr(32, 25, "CALCULATOR");
     oled.drawHLine(10, 32, 108);
 
     if (i == 0) {
@@ -72,10 +83,11 @@ void bootScreen() {
 }
 
 void loop() {
+  digitalWrite(Blue_LED, LOW);
   handlePowerButton();
-
   if (ScreenState) {
     readButtons();
+    handleOkButton();
     screen();
   } else {
     oled.setPowerSave(1);
@@ -84,9 +96,6 @@ void loop() {
   if (ScreenState) {
     oled.setPowerSave(0);
   }
-
-  readButtons();
-  screen();
 }
 
 void readButtons() {
@@ -116,11 +125,6 @@ void readButtons() {
       cursorCol++;
     }
     while (digitalRead(BTN_RIGHT) == LOW) delay(10);
-  }
-
-  if (digitalRead(BTN_OK) == LOW) {
-  selectKey();
-  while (digitalRead(BTN_OK) == LOW) delay(10);
   }
 }
 
@@ -247,9 +251,32 @@ void handlePowerButton() {
 
       if (LastPowerState == LOW) {
         ScreenState = !ScreenState;
+        expression = "";
       }
     }
   }
 
   lastReading = reading;
+}
+
+void handleOkButton() {
+  bool currentOKState = digitalRead(BTN_OK);
+
+  if (currentOKState == LOW && lastOKState == HIGH) {
+    pressStart = millis();
+    longPressHandled = false;
+  }
+
+  if (currentOKState == LOW && millis() - pressStart >= 600 && longPressHandled == false && cursorRow == 3 && cursorCol == 1) {
+    longPressHandled = !longPressHandled;
+    expression += ".";
+  }
+
+  if (currentOKState == HIGH && lastOKState == LOW) {
+    if (!longPressHandled) {
+      selectKey();
+    }
+  }
+
+  lastOKState = currentOKState;
 }
