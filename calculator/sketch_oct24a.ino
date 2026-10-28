@@ -33,6 +33,7 @@ bool lastOKState = HIGH;
 bool longPressHandled = false;
 bool menuOpen = false;
 bool toolsLoaded = false;
+bool wifiOpen = false;
 
 unsigned long lastDebounceTime = 0;
 unsigned long pressStart = 0;
@@ -88,24 +89,23 @@ void loop() {
   digitalWrite(Blue_LED, LOW);
   handlePowerButton();
   if (ScreenState) {
-    readButtons();
-    handleOkButton();
+    oled.setPowerSave(0);
     if (menuOpen == false) {
+      readButtons();
+      handleOkButton();
       screen();
     } else {
       if (toolsLoaded == false) {
         HackMenu();
         toolsLoaded = true;
       }
-    HackTools();
+      HackTools();
     }
   } else {
     oled.setPowerSave(1);
   }
-  if (ScreenState) {
-    oled.setPowerSave(0);
-  }
 }
+
 void readButtons() {
   if (digitalRead(BTN_UP) == LOW) {
     if (cursorRow > 0) {
@@ -296,7 +296,7 @@ void HackMenu() {
   for (int i = 0; i < 9; i++) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tf);
-
+    digitalWrite(Blue_LED, HIGH);
     oled.drawStr(32, 25, "HACK MODE");
     oled.drawHLine(10, 32, 108);
 
@@ -325,10 +325,42 @@ void HackMenu() {
   }
 }
 
-void HackTools() {
+void WIFI() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x12_tf);
-  oled.drawStr(32, 25, "PENIS");
-  oled.drawHLine(10, 32, 108);
+  oled.drawHLine(32, 20, 77);
+  oled.drawHLine(32, 40, 77);
+  oled.drawVLine(32, 20, 20);
+  oled.drawVLine(109, 20, 20);
+  oled.drawStr(38, 34, "WI-FI TOOLS");
   oled.sendBuffer();
+}
+
+void HackTools() {
+  if (wifiOpen) {
+    WIFI();
+    if (digitalRead(BTN_LEFT) == LOW) {
+      wifiOpen = false;
+      while (digitalRead(BTN_LEFT) == LOW) delay(10);
+    }
+    return;
+  }
+  digitalWrite(Blue_LED, LOW);
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawHLine(32, 20, 70);
+  oled.drawHLine(32, 40, 70);
+  oled.drawVLine(32, 20, 20);
+  oled.drawVLine(102, 20, 20);
+  oled.drawStr(38, 34, "CALCULATOR");
+  oled.sendBuffer();
+  if (digitalRead(BTN_RIGHT) == LOW) {
+    wifiOpen = true;
+    while (digitalRead(BTN_RIGHT) == LOW) delay(10);
+  } else if (digitalRead(BTN_OK) == LOW) {
+    while (digitalRead(BTN_OK) == LOW) delay(10);
+    menuOpen = false;
+    toolsLoaded = false;
+    lastOKState = HIGH;
+  }
 }
