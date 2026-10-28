@@ -31,6 +31,8 @@ bool ScreenState = true;
 bool OkPressed = false;
 bool lastOKState = HIGH;
 bool longPressHandled = false;
+bool menuOpen = false;
+bool toolsLoaded = false;
 
 unsigned long lastDebounceTime = 0;
 unsigned long pressStart = 0;
@@ -88,16 +90,22 @@ void loop() {
   if (ScreenState) {
     readButtons();
     handleOkButton();
-    screen();
+    if (menuOpen == false) {
+      screen();
+    } else {
+      if (toolsLoaded == false) {
+        HackMenu();
+        toolsLoaded = true;
+      }
+    HackTools();
+    }
   } else {
     oled.setPowerSave(1);
   }
-
   if (ScreenState) {
     oled.setPowerSave(0);
   }
 }
-
 void readButtons() {
   if (digitalRead(BTN_UP) == LOW) {
     if (cursorRow > 0) {
@@ -197,7 +205,8 @@ void selectKey() {
     expression = "";
   } else if (key == '=') {
       if (expression == "616") {
-        digitalWrite(Blue_LED, HIGH);
+        menuOpen = true;
+        expression = "";
       } else {
         calculate();
       }
@@ -281,4 +290,45 @@ void handleOkButton() {
   }
 
   lastOKState = currentOKState;
+}
+
+void HackMenu() {
+  for (int i = 0; i < 9; i++) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tf);
+
+    oled.drawStr(32, 25, "HACK MODE");
+    oled.drawHLine(10, 32, 108);
+
+    if (i == 0) {
+      oled.drawStr(15, 48, "Loading.");
+    } else if (i == 1) {
+      oled.drawStr(15, 48, "Loading..");
+    } else if (i == 2) {
+      oled.drawStr(15, 48, "Loading...");
+    } else if (i == 3) {
+      oled.drawStr(15, 48, "LOADING MODULES");
+    } else if (i == 4) {
+      oled.drawStr(15, 48, "CHECKING MEMORY");
+    } else if (i == 5) {
+      oled.drawStr(15, 48, "LOAD DATA");
+    } else if (i == 6) {
+      oled.drawStr(15, 48, "INITIALIZING");
+    } else if (i == 7) {
+      oled.drawStr(15, 48, "LOADING PAYLOAD");
+    } else if (i == 8) {
+      oled.drawStr(15, 48, "WELCOME BACK");
+    }
+    oled.sendBuffer();
+    toolsLoaded = true;
+    delay(1000);
+  }
+}
+
+void HackTools() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(32, 25, "PENIS");
+  oled.drawHLine(10, 32, 108);
+  oled.sendBuffer();
 }
