@@ -195,10 +195,12 @@ void selectKey() {
 
   if (key == 'C') {
     expression = "";
-
   } else if (key == '=') {
-    calculate();
-
+      if (expression == "616") {
+        digitalWrite(Blue_LED, HIGH);
+      } else {
+        calculate();
+      }
   } else if (key != ' ') {
     expression += key;
   }
