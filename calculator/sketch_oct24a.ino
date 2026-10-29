@@ -1,6 +1,19 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "anonymous_logo.h"
+#include <WiFi.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
+// значения порога: 0 (самый низкий, ~2.43V) ... 7 (самый высокий, ~2.76V)
+// чем меньше число — тем ниже порог срабатывания (более терпимо к просадке)
+void setBrownoutThreshold(uint8_t level) {
+  uint32_t reg = READ_PERI_REG(RTC_CNTL_BROWN_OUT_REG);
+  reg = (reg & ~(0x7 << 16)) | (level << 16);
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, reg);
+}
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
@@ -19,11 +32,18 @@ const int rowx1 = 15;
 const int rowx2 = 45;
 const int rowx3 = 78;
 const int rowx4 = 110;
+const int wifiMenuCount = 5;
 const unsigned long debounceDelay = 50;
+const char* wifiMenuItems[wifiMenuCount] = {
+  "Scan Networks","Deauth","Evil Portal","Beacon Spam","Back"
+  };
 
 int cursorRow = 0;
 int cursorCol = 0;
 int lastReading = HIGH;
+int wifiScanResultCount = -2; // -2 = ещё не сканировали
+int wifiScanScroll = 0;
+int wifiMenuIndex = 0;
 
 bool LastPowerState = HIGH;
 bool PowerState;
@@ -34,6 +54,8 @@ bool longPressHandled = false;
 bool menuOpen = false;
 bool toolsLoaded = false;
 bool wifiOpen = false;
+bool wifiScanView = false;
+bool wifiScanRunning = false;
 
 unsigned long lastDebounceTime = 0;
 unsigned long pressStart = 0;
@@ -41,6 +63,8 @@ unsigned long pressStart = 0;
 String expression = "";
 
 void setup() {
+  setBrownoutThreshold(2);
+  setCpuFrequencyMhz(160);
   pinMode(BTN_UP, INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_LEFT, INPUT_PULLUP);
@@ -52,6 +76,28 @@ void setup() {
   Wire.begin(21, 22);
   oled.begin();
   oled.setFont(u8g2_font_6x12_tf);
+
+  esp_reset_reason_t reason = esp_reset_reason();
+  String reasonText;
+  switch (reason) {
+    case ESP_RST_POWERON:   reasonText = "POWERON";   break;
+    case ESP_RST_EXT:       reasonText = "EXT RESET";  break;
+    case ESP_RST_SW:        reasonText = "SW RESET";   break;
+    case ESP_RST_PANIC:     reasonText = "PANIC";      break;
+    case ESP_RST_INT_WDT:   reasonText = "INT WDT";    break;
+    case ESP_RST_TASK_WDT:  reasonText = "TASK WDT";   break;
+    case ESP_RST_WDT:       reasonText = "WDT";        break;
+    case ESP_RST_BROWNOUT:  reasonText = "BROWNOUT";   break;
+    case ESP_RST_SDIO:      reasonText = "SDIO";       break;
+    default:                reasonText = "OTHER:" + String((int)reason); break;
+  }
+  if (reason != ESP_RST_POWERON) {
+    oled.clearBuffer();
+    oled.drawStr(5, 25, "RESET REASON:");
+    oled.drawStr(5, 45, reasonText.c_str());
+    oled.sendBuffer();
+    delay(4000);
+  }
   bootScreen();
 }
 
@@ -337,14 +383,16 @@ void WIFI() {
 }
 
 void HackTools() {
-  if (wifiOpen) {
-    WIFI();
-    if (digitalRead(BTN_LEFT) == LOW) {
-      wifiOpen = false;
-      while (digitalRead(BTN_LEFT) == LOW) delay(10);
-    }
+  if (wifiScanView) {
+    drawWifiScanResults();
     return;
   }
+  if (wifiOpen) {
+    drawWifiMenu();
+    handleWifiMenuInput();
+    return;
+  }
+
   digitalWrite(Blue_LED, LOW);
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x12_tf);
@@ -354,13 +402,155 @@ void HackTools() {
   oled.drawVLine(102, 20, 20);
   oled.drawStr(38, 34, "CALCULATOR");
   oled.sendBuffer();
+
   if (digitalRead(BTN_RIGHT) == LOW) {
     wifiOpen = true;
+    wifiMenuIndex = 0;
     while (digitalRead(BTN_RIGHT) == LOW) delay(10);
   } else if (digitalRead(BTN_OK) == LOW) {
     while (digitalRead(BTN_OK) == LOW) delay(10);
     menuOpen = false;
     toolsLoaded = false;
     lastOKState = HIGH;
+  }
+}
+
+void drawWifiMenu() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+
+  oled.drawStr(33, 10, "WI-FI TOOLS");
+  oled.drawHLine(0, 13, 128);
+
+  int visibleItems = 4;
+  int startIndex = 0;
+
+  if (wifiMenuIndex >= visibleItems) {
+    startIndex = wifiMenuIndex - visibleItems + 1;
+  }
+
+  for (int i = 0; i < visibleItems; i++) {
+    int itemIndex = startIndex + i;
+    if (itemIndex >= wifiMenuCount) break;
+
+    int y = 25 + i * 12;
+
+    if (itemIndex == wifiMenuIndex) {
+      oled.drawBox(0, y - 9, 128, 11);
+      oled.setDrawColor(0);
+      oled.drawStr(6, y, wifiMenuItems[itemIndex]);
+      oled.setDrawColor(1);
+    } else {
+      oled.drawStr(6, y, wifiMenuItems[itemIndex]);
+    }
+  }
+
+  oled.sendBuffer();
+}
+
+void handleWifiMenuInput() {
+  if (digitalRead(BTN_UP) == LOW) {
+    if (wifiMenuIndex > 0) wifiMenuIndex--;
+    while (digitalRead(BTN_UP) == LOW) delay(10);
+  }
+
+  if (digitalRead(BTN_DOWN) == LOW) {
+    if (wifiMenuIndex < wifiMenuCount - 1) wifiMenuIndex++;
+    while (digitalRead(BTN_DOWN) == LOW) delay(10);
+  }
+
+  if (digitalRead(BTN_LEFT) == LOW) {
+    wifiOpen = false;
+    while (digitalRead(BTN_LEFT) == LOW) delay(10);
+    return;
+  }
+
+  if (digitalRead(BTN_OK) == LOW) {
+    while (digitalRead(BTN_OK) == LOW) delay(10);
+    selectWifiTool();
+  }
+}
+
+void selectWifiTool() {
+  String choice = wifiMenuItems[wifiMenuIndex];
+
+  if (choice == "Back") {
+    wifiOpen = false;
+    return;
+  }
+
+  if (choice == "Scan Networks") {
+    startWifiScan();
+    return;
+  }
+  // Deauth / Evil Portal / Beacon Spam: не реализовано
+  showComingSoon(choice);
+}
+
+void showComingSoon(String name) {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(20, 30, name.c_str());
+  oled.drawStr(15, 45, "Not available");
+  oled.sendBuffer();
+  delay(1200);
+}
+
+void startWifiScan() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(20, 34, "Scanning...");
+  oled.sendBuffer();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(300);
+
+  esp_task_wdt_delete(NULL);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  wifiScanResultCount = WiFi.scanNetworks();
+  esp_task_wdt_add(NULL);
+
+  wifiScanScroll = 0;
+  wifiScanView = true;
+}
+
+void drawWifiScanResults() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(30, 10, "NETWORKS");
+  oled.drawHLine(0, 13, 128);
+
+  if (wifiScanResultCount <= 0) {
+    oled.drawStr(15, 35, "No networks found");
+  } else {
+    int visibleItems = 4;
+    for (int i = 0; i < visibleItems; i++) {
+      int idx = wifiScanScroll + i;
+      if (idx >= wifiScanResultCount) break;
+
+      String line = WiFi.SSID(idx);
+      line += " (" + String(WiFi.RSSI(idx)) + ")";
+
+      oled.drawStr(2, 25 + i * 12, line.c_str());
+    }
+  }
+
+  oled.sendBuffer();
+
+  if (digitalRead(BTN_DOWN) == LOW) {
+    if (wifiScanScroll + 4 < wifiScanResultCount) wifiScanScroll++;
+    while (digitalRead(BTN_DOWN) == LOW) delay(10);
+  }
+
+  if (digitalRead(BTN_UP) == LOW) {
+    if (wifiScanScroll > 0) wifiScanScroll--;
+    while (digitalRead(BTN_UP) == LOW) delay(10);
+  }
+
+  if (digitalRead(BTN_LEFT) == LOW) {
+    WiFi.scanDelete();
+    wifiScanView = false;
+    while (digitalRead(BTN_LEFT) == LOW) delay(10);
   }
 }
