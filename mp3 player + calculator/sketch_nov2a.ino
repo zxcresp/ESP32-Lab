@@ -3,23 +3,20 @@
 #include <math.h>
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
-#include "anonymous_logo.h"
+#include "poison_logo_128x64.h"
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
-// --- Pins ---
+// Pins
 const int BTN_UP = 32;
 const int BTN_DOWN = 33;
 const int BTN_LEFT = 25;
 const int BTN_RIGHT = 26;
 const int BTN_OK = 27;
-// ВАЖНО: GPIO18 не умеет будить ESP32 из deep sleep (не RTC-пин).
-// Кнопку питания нужно перевесить на GPIO4 (RTC-способный пин), иначе
-// "настоящее" выключение/включение работать не будет.
-const int BTN_POWER = 4;
+const int BTN_POWER = 4; // RTC-пин, нужен для пробуждения из deep sleep
 const int Blue_LED = 2;
 
-// --- Calculator layout ---
+// Calculator layout
 const int rowy1 = 60;
 const int rowy2 = 47;
 const int rowy3 = 35;
@@ -29,37 +26,48 @@ const int rowx2 = 45;
 const int rowx3 = 78;
 const int rowx4 = 110;
 
-// --- App states ---
-enum AppState { STATE_MAIN_MENU, STATE_SET_TIME, STATE_CALCULATOR, STATE_SCI_MENU };
+enum AppState {
+  STATE_MAIN_MENU, STATE_SET_TIME, STATE_CALCULATOR,
+  STATE_SCI_MENU, STATE_SETTINGS, STATE_INFO
+};
 AppState appState = STATE_MAIN_MENU;
 
-// --- Calculator state ---
+// Calculator state
 int cursorRow = 0;
 int cursorCol = 0;
-bool lastOKState = HIGH;
-bool longPressHandled = false;
-unsigned long pressStart = 0;
 String expression = "";
 bool hasOperator = false;
 bool hasDecimal = false;
 
-// --- Main menu state ---
-int mainMenuIndex = 0; // 0 = Calculator, 1 = MP3 Player
+// OK button: неблокирующий опрос, срабатывает сразу на 600мс без ожидания отпускания
+bool lastOKState = HIGH;
+bool longPressHandled = false;
+unsigned long pressStart = 0;
+bool okShortFired = false;
+bool okLongFired = false;
 
-// --- Scientific menu state ---
+// Main menu
+const int mainMenuCount = 4;
+const char* mainMenuItems[mainMenuCount] = {"Calculator", "MP3 Player", "Settings", "Info"};
+int mainMenuIndex = 0;
+
+// Settings menu
+const int settingsMenuCount = 2;
+const char* settingsMenuItems[settingsMenuCount] = {"Set Time", "Back"};
+int settingsMenuIndex = 0;
+
+// Scientific menu
 const int sciMenuCount = 7;
 const char* sciMenuItems[sciMenuCount] = {
-  "sin", "cos", "tan", "cot", "sqrt(x)", "x^2", "Back"
+  "sin", "cos", "tan", "ctg", "sqrt(x)", "x^2", "Back"
 };
 int sciMenuIndex = 0;
 
-// --- Clock state (keeps ticking across deep sleep thanks to RTC memory,
-// but still needs to be set once after a full power loss) ---
 RTC_DATA_ATTR int rtcHours = 12;
 RTC_DATA_ATTR int rtcMinutes = 0;
 int clockSeconds = 0;
 unsigned long lastSecMillis = 0;
-int timeSetField = 0; // 0 = hours, 1 = minutes
+int timeSetField = 0; // 0 = часы, 1 = минуты
 
 void setup() {
   pinMode(BTN_UP, INPUT_PULLUP);
@@ -81,20 +89,21 @@ void setup() {
 void bootScreen() {
   digitalWrite(Blue_LED, HIGH);
   oled.clearBuffer();
-  oled.drawXBMP(0, 0, 128, 64, anonymous_logo);
+  oled.drawXBMP(0, 0, 128, 64, poison_logo);
   oled.sendBuffer();
   delay(3500);
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tf);
-    oled.drawStr(32, 25, "CALCULATOR");
+    oled.drawStr(32, 25, "Raze");
     oled.drawHLine(10, 32, 108);
 
     if (i == 0) oled.drawStr(32, 48, "Loading");
     else if (i == 1) oled.drawStr(32, 48, "Loading.");
     else if (i == 2) oled.drawStr(32, 48, "Loading..");
-    else oled.drawStr(32, 48, "Loading...");
+    else if (i == 3) oled.drawStr(32, 48, "Loading...");
+    else if (i == 4) oled.drawStr(10, 48, "Loading complete");
 
     oled.sendBuffer();
     delay(350);
@@ -105,6 +114,7 @@ void bootScreen() {
 void loop() {
   checkPowerButton();
   updateClock();
+  updateOkButton();
 
   switch (appState) {
     case STATE_MAIN_MENU:
@@ -116,24 +126,54 @@ void loop() {
       drawSetTime();
       break;
     case STATE_CALCULATOR:
+      handleCalculatorOk();
       readButtons();
-      handleOkButton();
       screen();
       break;
     case STATE_SCI_MENU:
       handleSciMenu();
       drawSciMenu();
       break;
+    case STATE_SETTINGS:
+      handleSettingsMenu();
+      drawSettingsMenu();
+      break;
+    case STATE_INFO:
+      handleInfo();
+      drawInfo();
+      break;
   }
 }
 
-// ======================= POWER (real on/off) =======================
+void updateOkButton() {
+  bool current = digitalRead(BTN_OK);
+  okShortFired = false;
+  okLongFired = false;
+
+  if (current == LOW && lastOKState == HIGH) {
+    pressStart = millis();
+    longPressHandled = false;
+  }
+
+  if (current == LOW && !longPressHandled && millis() - pressStart >= 600) {
+    longPressHandled = true;
+    okLongFired = true;
+  }
+
+  if (current == HIGH && lastOKState == LOW && !longPressHandled) {
+    okShortFired = true;
+  }
+
+  lastOKState = current;
+}
+
+// ======================= POWER =======================
 
 void checkPowerButton() {
   if (digitalRead(BTN_POWER) == LOW) {
-    delay(30); // debounce
+    delay(30);
     if (digitalRead(BTN_POWER) == LOW) {
-      while (digitalRead(BTN_POWER) == LOW) delay(10); // ждём отпускания
+      while (digitalRead(BTN_POWER) == LOW) delay(10);
       enterDeepSleep();
     }
   }
@@ -147,11 +187,9 @@ void enterDeepSleep() {
 
   rtc_gpio_pullup_en((gpio_num_t)BTN_POWER);
   rtc_gpio_pulldown_dis((gpio_num_t)BTN_POWER);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)BTN_POWER, 0); // будим по LOW
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BTN_POWER, 0);
 
   esp_deep_sleep_start();
-  // сюда управление не вернётся: следующее нажатие кнопки = полная
-  // перезагрузка и заново setup() -> bootScreen() -> главное меню
 }
 
 // ============================= CLOCK ================================
@@ -190,11 +228,10 @@ void handleSetTime() {
     timeSetField = 1;
     while (digitalRead(BTN_RIGHT) == LOW) delay(10);
   }
-  if (digitalRead(BTN_OK) == LOW) {
-    while (digitalRead(BTN_OK) == LOW) delay(10);
+  if (okShortFired) {
     clockSeconds = 0;
     lastSecMillis = millis();
-    appState = STATE_MAIN_MENU;
+    appState = STATE_SETTINGS;
   }
 }
 
@@ -211,7 +248,7 @@ void drawSetTime() {
   if (timeSetField == 0) oled.drawStr(44, 50, "^^");
   else oled.drawStr(68, 50, "^^");
 
-  oled.drawStr(2, 62, "UP/DN LR OK:save");
+  oled.drawStr(2, 62, "UP/DW OK:save");
   oled.sendBuffer();
 }
 
@@ -223,35 +260,28 @@ void handleMainMenu() {
     while (digitalRead(BTN_UP) == LOW) delay(10);
   }
   if (digitalRead(BTN_DOWN) == LOW) {
-    if (mainMenuIndex < 1) mainMenuIndex++;
+    if (mainMenuIndex < mainMenuCount - 1) mainMenuIndex++;
     while (digitalRead(BTN_DOWN) == LOW) delay(10);
   }
 
-  if (digitalRead(BTN_OK) == LOW) {
-    unsigned long start = millis();
-    bool isLong = false;
-    while (digitalRead(BTN_OK) == LOW) {
-      if (millis() - start >= 600) {
-        isLong = true;
+  if (okShortFired) {
+    switch (mainMenuIndex) {
+      case 0:
+        expression = "";
+        hasOperator = false;
+        hasDecimal = false;
+        appState = STATE_CALCULATOR;
         break;
-      }
-      delay(10);
-    }
-    while (digitalRead(BTN_OK) == LOW) delay(10); // ждём отпускания
-
-    if (isLong) {
-      timeSetField = 0;
-      appState = STATE_SET_TIME;
-      return;
-    }
-
-    if (mainMenuIndex == 0) {
-      expression = "";
-      hasOperator = false;
-      hasDecimal = false;
-      appState = STATE_CALCULATOR;
-    } else {
-      showComingSoonMP3();
+      case 1:
+        showComingSoonMP3();
+        break;
+      case 2:
+        settingsMenuIndex = 0;
+        appState = STATE_SETTINGS;
+        break;
+      case 3:
+        appState = STATE_INFO;
+        break;
     }
   }
 }
@@ -262,21 +292,23 @@ void drawMainMenu() {
 
   char timeStr[6];
   snprintf(timeStr, sizeof(timeStr), "%02d:%02d", rtcHours, rtcMinutes);
-  oled.drawStr(2, 10, "MAIN MENU");
+  oled.drawStr(2, 10, "Raze");
   oled.drawStr(96, 10, timeStr);
   oled.drawHLine(0, 13, 128);
 
-  const char* items[2] = {"Calculator", "MP3 Player"};
-  for (int i = 0; i < 2; i++) {
-    int y = 32 + i * 20;
+  for (int i = 0; i < mainMenuCount; i++) {
+    int y = 25 + i * 12;
     if (i == mainMenuIndex) {
-      oled.drawRFrame(10, y - 12, 108, 18, 3);
+      oled.drawBox(0, y - 9, 128, 11);
+      oled.setDrawColor(0);
+      oled.drawStr(6, y, mainMenuItems[i]);
+      if (i == 1) oled.drawStr(90, y, "(soon)");
+      oled.setDrawColor(1);
+    } else {
+      oled.drawStr(6, y, mainMenuItems[i]);
+      if (i == 1) oled.drawStr(90, y, "(soon)");
     }
-    oled.drawStr(20, y, items[i]);
-    if (i == 1) oled.drawStr(85, y, "(soon)");
   }
-
-  oled.drawStr(2, 62, "Hold OK: set clock");
   oled.sendBuffer();
 }
 
@@ -287,6 +319,79 @@ void showComingSoonMP3() {
   oled.drawStr(15, 45, "Coming soon");
   oled.sendBuffer();
   delay(1000);
+}
+
+// =========================== SETTINGS ================================
+
+void handleSettingsMenu() {
+  if (digitalRead(BTN_UP) == LOW) {
+    if (settingsMenuIndex > 0) settingsMenuIndex--;
+    while (digitalRead(BTN_UP) == LOW) delay(10);
+  }
+  if (digitalRead(BTN_DOWN) == LOW) {
+    if (settingsMenuIndex < settingsMenuCount - 1) settingsMenuIndex++;
+    while (digitalRead(BTN_DOWN) == LOW) delay(10);
+  }
+  if (digitalRead(BTN_LEFT) == LOW) {
+    appState = STATE_MAIN_MENU;
+    while (digitalRead(BTN_LEFT) == LOW) delay(10);
+    return;
+  }
+  if (okShortFired) {
+    if (settingsMenuIndex == 0) {
+      timeSetField = 0;
+      appState = STATE_SET_TIME;
+    } else {
+      appState = STATE_MAIN_MENU;
+    }
+  }
+}
+
+void drawSettingsMenu() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(30, 10, "SETTINGS");
+  oled.drawHLine(0, 13, 128);
+
+  for (int i = 0; i < settingsMenuCount; i++) {
+    int y = 28 + i * 14;
+    if (i == settingsMenuIndex) {
+      oled.drawBox(0, y - 9, 128, 11);
+      oled.setDrawColor(0);
+      oled.drawStr(6, y, settingsMenuItems[i]);
+      oled.setDrawColor(1);
+    } else {
+      oled.drawStr(6, y, settingsMenuItems[i]);
+    }
+  }
+  oled.sendBuffer();
+}
+
+// =========================== INFO ================================
+
+void handleInfo() {
+  if (digitalRead(BTN_LEFT) == LOW) {
+    appState = STATE_MAIN_MENU;
+    while (digitalRead(BTN_LEFT) == LOW) delay(10);
+    return;
+  }
+  if (okShortFired) {
+    appState = STATE_MAIN_MENU;
+  }
+}
+
+void drawInfo() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_tf);
+  oled.drawStr(45, 10, "INFO");
+  oled.drawHLine(0, 13, 128);
+
+  oled.drawStr(5, 26, "Diamond eyes calc");
+  oled.drawStr(5, 38, "Firmware v1.0");
+  oled.drawStr(5, 50, "ESP32 + SSD1306");
+  oled.drawStr(5, 62, "LEFT/OK: back");
+
+  oled.sendBuffer();
 }
 
 // =========================== CALCULATOR =============================
@@ -377,20 +482,18 @@ void selectKey() {
     calculate();
   } else if (key == '+' || key == '-' || key == '*' || key == '/') {
     if (expression.startsWith("=")) {
-      expression = expression.substring(1); // продолжаем от результата
+      expression = expression.substring(1);
       hasOperator = false;
       hasDecimal = false;
     }
     if (expression.length() == 0) {
-      if (key == '-') expression += key; // разрешаем ведущий минус
-      // другие знаки при пустом вводе игнорируем
+      if (key == '-') expression += key;
     } else if (!hasOperator) {
       expression += key;
       hasOperator = true;
-      hasDecimal = false; // сбрасываем для второго числа
+      hasDecimal = false;
     }
-    // если знак уже есть - повторное нажатие игнорируется
-  } else if (key != ' ') { // цифры
+  } else if (key != ' ') {
     if (expression.startsWith("=")) {
       expression = "";
       hasOperator = false;
@@ -434,7 +537,7 @@ void calculate() {
   hasDecimal = false;
 }
 
-// Красивое форматирование: целые без хвоста нулей, дробные - без лишних нулей
+// Целые - без хвоста нулей, дробные - без лишних нулей
 String formatResult(double val) {
   if (isnan(val) || isinf(val)) return "Error";
 
@@ -451,45 +554,25 @@ String formatResult(double val) {
   return s;
 }
 
-void handleOkButton() {
-  bool currentOKState = digitalRead(BTN_OK);
-
-  if (currentOKState == LOW && lastOKState == HIGH) {
-    pressStart = millis();
-    longPressHandled = false;
-  }
-
-  if (currentOKState == LOW && millis() - pressStart >= 600 && !longPressHandled) {
-    if (cursorRow == 3 && cursorCol == 1) {
-      // долгое нажатие на "0" - точка
+void handleCalculatorOk() {
+  if (okLongFired) {
+    if (cursorRow == 3 && cursorCol == 1) { // "0" -> точка
       if (!hasDecimal) {
         expression += ".";
         hasDecimal = true;
       }
-      longPressHandled = true;
-    } else if (cursorRow == 3 && cursorCol == 0) {
-      // долгое нажатие на "C" - выход в главное меню
-      longPressHandled = true;
-      while (digitalRead(BTN_OK) == LOW) delay(10);
-      lastOKState = HIGH;
+    } else if (cursorRow == 3 && cursorCol == 0) { // "C" -> главное меню
       appState = STATE_MAIN_MENU;
       return;
-    } else if (cursorRow == 3 && cursorCol == 2) {
-      // долгое нажатие на "=" - меню функций
-      longPressHandled = true;
-      while (digitalRead(BTN_OK) == LOW) delay(10);
-      lastOKState = HIGH;
+    } else if (cursorRow == 3 && cursorCol == 2) { // "=" -> меню функций
       sciMenuIndex = 0;
       appState = STATE_SCI_MENU;
       return;
     }
+    return;
   }
 
-  if (currentOKState == HIGH && lastOKState == LOW) {
-    if (!longPressHandled) selectKey();
-  }
-
-  lastOKState = currentOKState;
+  if (okShortFired) selectKey();
 }
 
 // ======================= SCIENTIFIC FUNCTIONS =======================
@@ -508,16 +591,13 @@ void handleSciMenu() {
     while (digitalRead(BTN_LEFT) == LOW) delay(10);
     return;
   }
-  if (digitalRead(BTN_OK) == LOW) {
-    while (digitalRead(BTN_OK) == LOW) delay(10);
-    selectSciFunction();
-  }
+  if (okShortFired) selectSciFunction();
 }
 
 void drawSciMenu() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x12_tf);
-  oled.drawStr(28, 10, "FUNCTIONS");
+  oled.drawStr(28, 10, "SCIENTIFIC FUNCTIONS");
   oled.drawHLine(0, 13, 128);
 
   int visibleItems = 4;
@@ -552,7 +632,7 @@ void selectSciFunction() {
   appState = STATE_CALCULATOR;
 }
 
-// Применяет функцию к текущему введённому числу (последнему операнду)
+// Применяет функцию к последнему введённому числу
 void applySciFunction(String func) {
   String numStr = expression;
   if (numStr.startsWith("=")) numStr = numStr.substring(1);
@@ -578,7 +658,7 @@ void applySciFunction(String func) {
   } else if (func == "tan") {
     double c = cos(x * PI / 180.0);
     if (fabs(c) < 1e-9) err = true; else result = sin(x * PI / 180.0) / c;
-  } else if (func == "cot") {
+  } else if (func == "ctg") {
     double s = sin(x * PI / 180.0);
     if (fabs(s) < 1e-9) err = true; else result = cos(x * PI / 180.0) / s;
   } else if (func == "sqrt(x)") {
